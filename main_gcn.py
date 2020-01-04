@@ -118,6 +118,13 @@ def main(args):
             error_best = ckpt['error']
             glob_step = ckpt['step']
             lr_now = ckpt['lr']
+            ####
+            for k in list(ckpt['state_dict'].keys()):
+                v = ckpt['state_dict'].pop(k)
+                if (type(k) == str) and ("nonlocal" in k):
+                    k = k.replace("nonlocal","nonlocal_layer")
+                ckpt['state_dict'][k] = v
+
             model_pos.load_state_dict(ckpt['state_dict'])
             optimizer.load_state_dict(ckpt['optimizer'])
             print("==> Loaded checkpoint (Epoch: {} | Error: {})".format(start_epoch, error_best))
