@@ -9,6 +9,7 @@ import pickle
 from pathlib import *
 import json_tricks as json
 import xml.etree.cElementTree as ET
+from common.camera import normalize_screen_coordinates_multiview, image_coordinates_multiview
 
 class SynDataset17():
     def __init__(self, root, image_set):
@@ -19,6 +20,7 @@ class SynDataset17():
         self.view_count = 8
         self.joint_count = 17
         self.grouping = self._get_db()
+        self.normalize2d()
         self.group_size = len(self.grouping)
         self._edge = [(0,1), (1, 2), (2, 6), (3, 6), (3, 4), (5, 4), (6, 7),
                      (7, 8), (8, 16), (16,9), (8, 12), (8, 13), (12, 11),
@@ -54,11 +56,11 @@ class SynDataset17():
 
         networkpred_path = frame['network_pred_path'] + "_ltn17"
 
-        nodes = frame['backbone_joints2d']  # 8*17*3
-        nodes[:,:,0] = nodes[:,:,0] / self.image_shape[1]
-        nodes[:,:,1] = nodes[:,:,1] / self.image_shape[0]
-        nodes = torch.from_numpy(np.array(nodes)).float()
-        nodes = nodes[0,:,0:2]
+        input = frame['backbone_joints2d_normalized']  # 8*17*3
+        input = torch.from_numpy(np.array(input)).float()
+
+        input_fortri = frame['backbone_joints2d']
+        input_fortri = torch.from_numpy(np.array(input_fortri)).float()
 
         target_score = frame['target_score']
         target_score = torch.from_numpy(np.array(target_score)).float()  # J,V
@@ -67,10 +69,11 @@ class SynDataset17():
             "target_score": target_score,
             "target_3d": target_3d,
             "camera": cameras,
-            "network_pred_path": networkpred_path
+            "2d_ori": input_fortri,
+            # "network_pred_path": networkpred_path
         }
 
-        return target_3d, nodes, target_dict
+        return target_score, input, target_dict
 
     def abspath2remotepath(self, abspath):
         search_str = "animation_mit"
@@ -148,6 +151,14 @@ class SynDataset17():
         joints_3d_17[9] = (joints_3d[15] + joints_3d[16]) / 2
         return joints_3d_17
 
+    def normalize2d(self):
+        #normalize input
+        for i in range(len(self.grouping)):
+            joints2d = copy.deepcopy(self.grouping[i]['backbone_joints2d'])
+            joints2d[:, :, 0:2] = normalize_screen_coordinates_multiview(joints2d[:, :, 0:2],
+                                                                        self.image_shape[1],
+                                                                        self.image_shape[0])
+            self.grouping[i]['backbone_joints2d_normalized'] = joints2d
 
     def _get_db(self):
         gt_db = []

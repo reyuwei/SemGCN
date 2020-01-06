@@ -19,7 +19,8 @@ from common.graph_utils import adj_mx_from_skeleton, adj_mx_from_edges
 from common.data_utils import fetch, read_3d_data, create_2d_data
 from common.generators import PoseGenerator
 from common.loss import mpjpe, p_mpjpe, rel_mpjpe
-from models.sem_gcn import SemGCN
+from common.triangulation import triangulation_acc
+from models.sem_gcn import SemGCN, MultiviewSemGCN
 
 
 def parse_args():
@@ -123,7 +124,7 @@ def main(args):
     # Create model
     print("==> Creating model...")
     p_dropout = (None if args.dropout == 0.0 else args.dropout)
-    model_pos = SemGCN(adj, args.hid_dim, coords_dim=(3, 3), num_layers=args.num_layers, p_dropout=p_dropout,
+    model_pos = MultiviewSemGCN(adj, args.hid_dim, coords_dim=(3, 1), num_layers=args.num_layers, p_dropout=p_dropout,
                        nodes_group=nodes_group).to(device)
     print("==> Total parameters: {:.2f}M".format(sum(p.numel() for p in model_pos.parameters()) / 1000000.0))
 
@@ -227,7 +228,7 @@ def main(args):
 def train(data_loader, model_pos, criterion, optimizer, device, lr_init, lr_now, step, decay, gamma, max_norm=True):
     batch_time = AverageMeter()
     data_time = AverageMeter()
-    epoch_loss_3d_pos = AverageMeter()
+    epoch_loss_score = AverageMeter()
 
     # Switch to train mode
     torch.set_grad_enabled(True)
@@ -235,26 +236,26 @@ def train(data_loader, model_pos, criterion, optimizer, device, lr_init, lr_now,
     end = time.time()
 
     bar = Bar('Train', max=len(data_loader))
-    for i, (targets_3d, inputs_2d, _) in enumerate(data_loader):
+    for i, (targets_score, inputs_2d, data_dict) in enumerate(data_loader):
         # Measure data loading time
         data_time.update(time.time() - end)
-        num_poses = targets_3d.size(0)
+        num_poses = targets_score.size(0)
 
         step += 1
         if step % decay == 0 or step == 1:
             lr_now = lr_decay(optimizer, step, lr_init, decay, gamma)
 
-        targets_3d, inputs_2d = targets_3d.to(device), inputs_2d.to(device)
-        outputs_3d = model_pos(inputs_2d)
+        targets_score, inputs_2d = targets_score.to(device), inputs_2d.to(device)
+        outputs_score = model_pos(inputs_2d)
 
         optimizer.zero_grad()
-        loss_3d_pos = criterion(outputs_3d, targets_3d)
-        loss_3d_pos.backward()
+        loss_score = criterion(outputs_score, targets_score)
+        loss_score.backward()
         if max_norm:
             nn.utils.clip_grad_norm_(model_pos.parameters(), max_norm=1)
         optimizer.step()
 
-        epoch_loss_3d_pos.update(loss_3d_pos.item(), num_poses)
+        epoch_loss_score.update(loss_score.item(), num_poses)
 
         # Measure elapsed time
         batch_time.update(time.time() - end)
@@ -263,11 +264,11 @@ def train(data_loader, model_pos, criterion, optimizer, device, lr_init, lr_now,
         bar.suffix = '({batch}/{size}) Data: {data:.6f}s | Batch: {bt:.3f}s | Total: {ttl:} | ETA: {eta:} ' \
                      '| Loss: {loss: .4f}' \
             .format(batch=i + 1, size=len(data_loader), data=data_time.val, bt=batch_time.avg,
-                    ttl=bar.elapsed_td, eta=bar.eta_td, loss=epoch_loss_3d_pos.avg)
+                    ttl=bar.elapsed_td, eta=bar.eta_td, loss=epoch_loss_score.avg)
         bar.next()
 
     bar.finish()
-    return epoch_loss_3d_pos.avg, lr_now, step
+    return epoch_loss_score.avg, lr_now, step
 
 
 def evaluate(data_loader, model_pos, device):
@@ -283,17 +284,18 @@ def evaluate(data_loader, model_pos, device):
     end = time.time()
 
     bar = Bar('Eval ', max=len(data_loader))
-    for i, (targets_3d, inputs_2d, _) in enumerate(data_loader):
+    for i, (targets_score, inputs_2d, data_dict) in enumerate(data_loader):
         # Measure data loading time
         data_time.update(time.time() - end)
-        num_poses = targets_3d.size(0)
+        num_poses = targets_score.size(0)
 
         inputs_2d = inputs_2d.to(device)
-        outputs_3d = model_pos(inputs_2d).cpu()
+        outputs_score = model_pos(inputs_2d).cpu()
         # outputs_3d[:, :, :] -= outputs_3d[:, :1, :]  # Zero-centre the root (hip)
 
-        epoch_loss_3d_pos.update(mpjpe(outputs_3d, targets_3d).item() * 1000.0, num_poses)
-        epoch_loss_3d_pos_relative.update(rel_mpjpe(outputs_3d, targets_3d).item() * 1000.0, num_poses)
+        output_3d, targets_3d = triangulation_acc(outputs_score, data_dict=data_dict)
+        epoch_loss_3d_pos.update(mpjpe(output_3d['ltr_after'], targets_3d).item()*1000.0, num_poses)
+        epoch_loss_3d_pos_relative.update(rel_mpjpe(output_3d['ltr_after'], targets_3d).item()*1000.0, num_poses)
         # epoch_loss_3d_pos_procrustes.update(p_mpjpe(outputs_3d.numpy(), targets_3d.numpy()).item(), num_poses)
 
         # Measure elapsed time

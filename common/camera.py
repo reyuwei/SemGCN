@@ -47,6 +47,27 @@ class Camera:
     def extrinsics(self):
         return np.hstack([self.R, self.t])
 
+def normalize_screen_coordinates_multiview(X, h, w):
+    assert X.shape[-1] == 2
+    C, J, _ = X.shape
+    X = X.reshape(-1, 2)
+
+    # Normalize so that [0, w] is mapped to [-1, 1], while preserving the aspect ratio
+    X = X / w * 2 - [1, h / w]
+    X = X.reshape(C, J, -1)
+    return X
+
+
+def image_coordinates_multiview(X, h, w):
+    assert X.shape[-1] == 2
+    C, J, _ = X.shape
+    X = X.reshape(-1, 2)
+
+    # Normalize so that [0, w] is mapped to [-1, 1], while preserving the aspect ratio
+    X = (X + [1, h / w]) * w / 2
+    X = X.reshape(C, J, -1)
+    return X
+
 def normalize_screen_coordinates(X, w, h):
     assert X.shape[-1] == 2
 

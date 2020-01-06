@@ -93,3 +93,47 @@ class SemGCN(nn.Module):
         out = self.gconv_layers(out)
         out = self.gconv_output(out)
         return out
+
+
+class MultiviewSemGCN(nn.Module):
+    def __init__(self, adj, hid_dim, coords_dim=(3,1), num_layers=4, nodes_group=None, p_dropout=None):
+        super(MultiviewSemGCN, self).__init__()
+
+        _gconv_input = [_GraphConv(adj, coords_dim[0], hid_dim, p_dropout=p_dropout)]
+        _gconv_layers = []
+
+        if nodes_group is None:
+            for i in range(num_layers):
+                _gconv_layers.append(_ResGraphConv(adj, hid_dim, hid_dim, hid_dim, p_dropout=p_dropout))
+        else:
+            group_size = len(nodes_group[0])
+            assert group_size > 1
+
+            grouped_order = list(reduce(lambda x, y: x + y, nodes_group))
+            restored_order = [0] * len(grouped_order)
+            for i in range(len(restored_order)):
+                for j in range(len(grouped_order)):
+                    if grouped_order[j] == i:
+                        restored_order[i] = j
+                        break
+
+            _gconv_input.append(_GraphNonLocal(hid_dim, grouped_order, restored_order, group_size))
+            for i in range(num_layers):
+                _gconv_layers.append(_ResGraphConv(adj, hid_dim, hid_dim, hid_dim, p_dropout=p_dropout))
+                _gconv_layers.append(_GraphNonLocal(hid_dim, grouped_order, restored_order, group_size))
+
+        self.gconv_input = nn.Sequential(*_gconv_input)
+        self.gconv_layers = nn.Sequential(*_gconv_layers)
+        self.gconv_output = SemGraphConv(hid_dim, coords_dim[1], adj)
+
+    def forward(self, x):
+        N, V, J, C = x.shape
+        x = x.view(N*V, J, C)
+
+        out = self.gconv_input(x)
+        out = self.gconv_layers(out)
+        out = self.gconv_output(out)
+
+        out = out.view(N,V,J)
+        out = out.permute(0, 2, 1).contiguous()
+        return out
