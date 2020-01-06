@@ -18,7 +18,7 @@ from common.utils import AverageMeter, lr_decay, save_ckpt
 from common.graph_utils import adj_mx_from_skeleton, adj_mx_from_edges
 from common.data_utils import fetch, read_3d_data, create_2d_data
 from common.generators import PoseGenerator
-from common.loss import mpjpe, p_mpjpe
+from common.loss import mpjpe, p_mpjpe, rel_mpjpe
 from models.sem_gcn import SemGCN
 
 
@@ -190,8 +190,8 @@ def main(args):
         elif args.dataset == "synmit":
             errors_p1, errors_p2 = evaluate(valid_loader, model_pos, device)
 
-        print('Protocol #1   (MPJPE) action-wise average: {:.2f} (mm)'.format(np.mean(errors_p1).item()))
-        print('Protocol #2 (P-MPJPE) action-wise average: {:.2f} (mm)'.format(np.mean(errors_p2).item()))
+        print('Protocol #1 (MPJPE)     action-wise average: {:.2f} (mm)'.format(np.mean(errors_p1).item()))
+        print('Protocol #2 (REL-MPJPE) action-wise average: {:.2f} (mm)'.format(np.mean(errors_p2).item()))
         exit(0)
 
     for epoch in range(start_epoch, args.epochs):
@@ -274,7 +274,8 @@ def evaluate(data_loader, model_pos, device):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     epoch_loss_3d_pos = AverageMeter()
-    epoch_loss_3d_pos_procrustes = AverageMeter()
+    # epoch_loss_3d_pos_procrustes = AverageMeter()
+    epoch_loss_3d_pos_relative = AverageMeter()
 
     # Switch to evaluate mode
     torch.set_grad_enabled(False)
@@ -289,23 +290,24 @@ def evaluate(data_loader, model_pos, device):
 
         inputs_2d = inputs_2d.to(device)
         outputs_3d = model_pos(inputs_2d).cpu()
-        outputs_3d[:, :, :] -= outputs_3d[:, :1, :]  # Zero-centre the root (hip)
+        # outputs_3d[:, :, :] -= outputs_3d[:, :1, :]  # Zero-centre the root (hip)
 
         epoch_loss_3d_pos.update(mpjpe(outputs_3d, targets_3d).item() * 1000.0, num_poses)
-        epoch_loss_3d_pos_procrustes.update(p_mpjpe(outputs_3d.numpy(), targets_3d.numpy()).item() * 1000.0, num_poses)
+        epoch_loss_3d_pos_relative.update(rel_mpjpe(outputs_3d, targets_3d).item() * 1000.0, num_poses)
+        # epoch_loss_3d_pos_procrustes.update(p_mpjpe(outputs_3d.numpy(), targets_3d.numpy()).item(), num_poses)
 
         # Measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
 
         bar.suffix = '({batch}/{size}) Data: {data:.6f}s | Batch: {bt:.3f}s | Total: {ttl:} | ETA: {eta:} ' \
-                     '| MPJPE: {e1: .4f} | P-MPJPE: {e2: .4f}' \
+                     '| MPJPE: {e1: .4f} | REL-MPJPE: {e2: .4f}' \
             .format(batch=i + 1, size=len(data_loader), data=data_time.val, bt=batch_time.avg,
-                    ttl=bar.elapsed_td, eta=bar.eta_td, e1=epoch_loss_3d_pos.avg, e2=epoch_loss_3d_pos_procrustes.avg)
+                    ttl=bar.elapsed_td, eta=bar.eta_td, e1=epoch_loss_3d_pos.avg, e2=epoch_loss_3d_pos_relative.avg)
         bar.next()
 
     bar.finish()
-    return epoch_loss_3d_pos.avg, epoch_loss_3d_pos_procrustes.avg
+    return epoch_loss_3d_pos.avg, epoch_loss_3d_pos_relative.avg
 
 
 if __name__ == '__main__':

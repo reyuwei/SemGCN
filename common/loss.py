@@ -13,6 +13,17 @@ def mpjpe(predicted, target):
     return torch.mean(torch.norm(predicted - target, dim=len(target.shape) - 1))
 
 
+def rel_mpjpe(predicted, target):
+    """
+    Relative mean per-joint position error (i.e. mean Euclidean distance),
+    """
+    assert predicted.shape == target.shape
+    root_index = 6
+    predicted = predicted - predicted[:, root_index:root_index + 1, :]
+    target = target - target[:, root_index:root_index + 1, :]
+    return torch.mean(torch.norm(predicted - target, dim=len(target.shape) - 1))
+
+
 def weighted_mpjpe(predicted, target, w):
     """
     Weighted mean per-joint position error (i.e. mean Euclidean distance)
