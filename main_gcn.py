@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from progress.bar import Bar
 from common.log import Logger, savefig
 from common.utils import AverageMeter, lr_decay, save_ckpt
-from common.graph_utils import adj_mx_from_skeleton
+from common.graph_utils import adj_mx_from_skeleton, adj_mx_from_edges
 from common.data_utils import fetch, read_3d_data, create_2d_data
 from common.generators import PoseGenerator
 from common.loss import mpjpe, p_mpjpe
@@ -27,6 +27,7 @@ def parse_args():
 
     # General arguments
     parser.add_argument('-d', '--dataset', default='h36m', type=str, metavar='NAME', help='target dataset')
+    parser.add_argument('-dpath', '--dataset_path', default='', type=str, metavar='NAME', help='target dataset')
     parser.add_argument('-k', '--keypoints', default='gt', type=str, metavar='NAME', help='2D detections to use')
     parser.add_argument('-a', '--actions', default='*', type=str, metavar='LIST',
                         help='actions to train/test on, separated by comma, or * for all')
@@ -71,37 +72,59 @@ def main(args):
     print('==> Using settings {}'.format(args))
 
     print('==> Loading dataset...')
-    dataset_path = path.join('data', 'data_3d_' + args.dataset + '.npz')
     if args.dataset == 'h36m':
+        dataset_path = path.join('data', 'data_3d_' + args.dataset + '.npz')
         from common.h36m_dataset import Human36mDataset, TRAIN_SUBJECTS, TEST_SUBJECTS
         dataset = Human36mDataset(dataset_path)
         subjects_train = TRAIN_SUBJECTS
         subjects_test = TEST_SUBJECTS
+
+        print('==> Preparing data ' + args.dataset + "...")
+        dataset = read_3d_data(dataset)
+        adj = adj_mx_from_skeleton(dataset.skeleton())
+        nodes_group = dataset.skeleton().joints_group() if args.non_local else None
+
+        print('==> Loading 2D detections...')
+        keypoints = create_2d_data(path.join('data', 'data_2d_' + args.dataset + '_' + args.keypoints + '.npz'), dataset)
+        action_filter = None if args.actions == '*' else args.actions.split(',')
+
+        stride = args.downsample
+        if action_filter is not None:
+            action_filter = map(lambda x: dataset.define_actions(x)[0], action_filter)
+            print('==> Selected actions: {}'.format(action_filter))
+
+        if not args.evaluate:
+            print('==> Build DataLoader...')
+            poses_train, poses_train_2d, actions_train = fetch(subjects_train, dataset, keypoints, action_filter, stride)
+            train_loader = DataLoader(PoseGenerator(poses_train, poses_train_2d, actions_train), batch_size=args.batch_size,
+                                      shuffle=True, num_workers=args.num_workers, pin_memory=True)
+            poses_valid, poses_valid_2d, actions_valid = fetch(subjects_test, dataset, keypoints, action_filter, stride)
+            valid_loader = DataLoader(PoseGenerator(poses_valid, poses_valid_2d, actions_valid), batch_size=args.batch_size,
+                                      shuffle=False, num_workers=args.num_workers, pin_memory=True)
+    elif args.dataset == "synmit":
+        dataset_path = args.dataset_path
+        from common.synmit_dataset import SynDataset17
+        train_dataset = SynDataset17(dataset_path, image_set="train")
+        valid_dataset = SynDataset17(dataset_path, image_set="val")
+        dataset = train_dataset
+        adj = adj_mx_from_edges(dataset.jointcount(), dataset.edge(), sparse=False)
+        nodes_group = dataset.nodesgroup() if args.non_local else None
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
+                                  shuffle=True, num_workers=args.num_workers, pin_memory=True)
+        valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size,
+                                  shuffle=False, num_workers=args.num_workers, pin_memory=True)
     else:
         raise KeyError('Invalid dataset')
 
-    print('==> Preparing data...')
-    dataset = read_3d_data(dataset)
 
-    print('==> Loading 2D detections...')
-    keypoints = create_2d_data(path.join('data', 'data_2d_' + args.dataset + '_' + args.keypoints + '.npz'), dataset)
-
-    action_filter = None if args.actions == '*' else args.actions.split(',')
-    if action_filter is not None:
-        action_filter = map(lambda x: dataset.define_actions(x)[0], action_filter)
-        print('==> Selected actions: {}'.format(action_filter))
-
-    stride = args.downsample
     cudnn.benchmark = True
     device = torch.device("cuda")
 
     # Create model
     print("==> Creating model...")
-
     p_dropout = (None if args.dropout == 0.0 else args.dropout)
-    adj = adj_mx_from_skeleton(dataset.skeleton())
     model_pos = SemGCN(adj, args.hid_dim, num_layers=args.num_layers, p_dropout=p_dropout,
-                       nodes_group=dataset.skeleton().joints_group() if args.non_local else None).to(device)
+                       nodes_group=nodes_group).to(device)
     print("==> Total parameters: {:.2f}M".format(sum(p.numel() for p in model_pos.parameters()) / 1000000.0))
 
     criterion = nn.MSELoss(reduction='mean').to(device)
@@ -139,7 +162,8 @@ def main(args):
         error_best = None
         glob_step = 0
         lr_now = args.lr
-        ckpt_dir_path = path.join(args.checkpoint, datetime.datetime.now().isoformat())
+        ckpt_dir_path = path.join(args.checkpoint, datetime.datetime.now().isoformat(timespec="seconds"))
+        ckpt_dir_path = ckpt_dir_path.replace(":","-")
 
         if not path.exists(ckpt_dir_path):
             os.makedirs(ckpt_dir_path)
@@ -150,31 +174,25 @@ def main(args):
 
     if args.evaluate:
         print('==> Evaluating...')
+        if args.dataset == 'h36m':
+            if action_filter is None:
+                action_filter = dataset.define_actions()
 
-        if action_filter is None:
-            action_filter = dataset.define_actions()
+            errors_p1 = np.zeros(len(action_filter))
+            errors_p2 = np.zeros(len(action_filter))
 
-        errors_p1 = np.zeros(len(action_filter))
-        errors_p2 = np.zeros(len(action_filter))
-
-        for i, action in enumerate(action_filter):
-            poses_valid, poses_valid_2d, actions_valid = fetch(subjects_test, dataset, keypoints, [action], stride)
-            valid_loader = DataLoader(PoseGenerator(poses_valid, poses_valid_2d, actions_valid),
-                                      batch_size=args.batch_size, shuffle=False,
-                                      num_workers=args.num_workers, pin_memory=True)
-            errors_p1[i], errors_p2[i] = evaluate(valid_loader, model_pos, device)
+            for i, action in enumerate(action_filter):
+                poses_valid, poses_valid_2d, actions_valid = fetch(subjects_test, dataset, keypoints, [action], stride)
+                valid_loader = DataLoader(PoseGenerator(poses_valid, poses_valid_2d, actions_valid),
+                                          batch_size=args.batch_size, shuffle=False,
+                                          num_workers=args.num_workers, pin_memory=True)
+                errors_p1[i], errors_p2[i] = evaluate(valid_loader, model_pos, device)
+        elif args.dataset == "synmit":
+            errors_p1, errors_p2 = evaluate(valid_loader, model_pos, device)
 
         print('Protocol #1   (MPJPE) action-wise average: {:.2f} (mm)'.format(np.mean(errors_p1).item()))
         print('Protocol #2 (P-MPJPE) action-wise average: {:.2f} (mm)'.format(np.mean(errors_p2).item()))
         exit(0)
-
-    poses_train, poses_train_2d, actions_train = fetch(subjects_train, dataset, keypoints, action_filter, stride)
-    train_loader = DataLoader(PoseGenerator(poses_train, poses_train_2d, actions_train), batch_size=args.batch_size,
-                              shuffle=True, num_workers=args.num_workers, pin_memory=True)
-
-    poses_valid, poses_valid_2d, actions_valid = fetch(subjects_test, dataset, keypoints, action_filter, stride)
-    valid_loader = DataLoader(PoseGenerator(poses_valid, poses_valid_2d, actions_valid), batch_size=args.batch_size,
-                              shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
     for epoch in range(start_epoch, args.epochs):
         print('\nEpoch: %d | LR: %.8f' % (epoch + 1, lr_now))
