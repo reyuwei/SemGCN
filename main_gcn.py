@@ -123,7 +123,7 @@ def main(args):
     # Create model
     print("==> Creating model...")
     p_dropout = (None if args.dropout == 0.0 else args.dropout)
-    model_pos = SemGCN(adj, args.hid_dim, num_layers=args.num_layers, p_dropout=p_dropout,
+    model_pos = SemGCN(adj, args.hid_dim, coords_dim=(3, 3), num_layers=args.num_layers, p_dropout=p_dropout,
                        nodes_group=nodes_group).to(device)
     print("==> Total parameters: {:.2f}M".format(sum(p.numel() for p in model_pos.parameters()) / 1000000.0))
 
