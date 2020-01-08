@@ -102,11 +102,15 @@ def main(args):
             poses_valid, poses_valid_2d, actions_valid = fetch(subjects_test, dataset, keypoints, action_filter, stride)
             valid_loader = DataLoader(PoseGenerator(poses_valid, poses_valid_2d, actions_valid), batch_size=args.batch_size,
                                       shuffle=False, num_workers=args.num_workers, pin_memory=True)
-    elif args.dataset == "synmit":
+    elif "synmit" in args.dataset:
         dataset_path = args.dataset_path
-        from common.synmit_dataset import SynDataset17
-        train_dataset = SynDataset17(dataset_path, image_set="train")
-        valid_dataset = SynDataset17(dataset_path, image_set="val")
+        from common.synmit_dataset import SynDataset17, SynDataset17_h36m
+        if "h36m" in args.dataset:
+            train_dataset = SynDataset17_h36m(dataset_path, image_set="train")
+            valid_dataset = SynDataset17_h36m(dataset_path, image_set="val")
+        else:
+            train_dataset = SynDataset17(dataset_path, image_set="train")
+            valid_dataset = SynDataset17(dataset_path, image_set="val")
         dataset = train_dataset
         adj = adj_mx_from_edges(dataset.jointcount(), dataset.edge(), sparse=False)
         nodes_group = dataset.nodesgroup() if args.non_local else None
@@ -141,13 +145,15 @@ def main(args):
             start_epoch = ckpt['epoch']
             error_best = ckpt['error']
             glob_step = ckpt['step']
-            lr_now = ckpt['lr']
+            # lr_now = ckpt['lr']
+            lr_now = args.lr
             ####
-            for k in list(ckpt['state_dict'].keys()):
-                v = ckpt['state_dict'].pop(k)
-                if (type(k) == str) and ("nonlocal" in k):
-                    k = k.replace("nonlocal","nonlocal_layer")
-                ckpt['state_dict'][k] = v
+            if args.dataset == "h36m":
+                for k in list(ckpt['state_dict'].keys()):
+                    v = ckpt['state_dict'].pop(k)
+                    if (type(k) == str) and ("nonlocal" in k):
+                        k = k.replace("nonlocal","nonlocal_layer")
+                    ckpt['state_dict'][k] = v
 
             model_pos.load_state_dict(ckpt['state_dict'])
             optimizer.load_state_dict(ckpt['optimizer'])
@@ -163,7 +169,7 @@ def main(args):
         error_best = None
         glob_step = 0
         lr_now = args.lr
-        ckpt_dir_path = path.join(args.checkpoint, datetime.datetime.now().isoformat(timespec="seconds"))
+        ckpt_dir_path = path.join(args.checkpoint, args.dataset + "_" + datetime.datetime.now().isoformat(timespec="seconds"))
         ckpt_dir_path = ckpt_dir_path.replace(":","-")
 
         if not path.exists(ckpt_dir_path):
@@ -188,8 +194,14 @@ def main(args):
                                           batch_size=args.batch_size, shuffle=False,
                                           num_workers=args.num_workers, pin_memory=True)
                 errors_p1[i], errors_p2[i] = evaluate(valid_loader, model_pos, device)
-        elif args.dataset == "synmit":
-            errors_p1, errors_p2 = evaluate(valid_loader, model_pos, device)
+        elif "synmit" in args.dataset:
+            if "h36m" in args.dataset:
+                test_dataset = SynDataset17_h36m(dataset_path, image_set="train")
+            else:
+                test_dataset = SynDataset17(dataset_path, image_set="test")
+            test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
+                                      shuffle=False, num_workers=args.num_workers, pin_memory=True)
+            errors_p1, errors_p2 = evaluate(test_loader, model_pos, device)
 
         print('Protocol #1 (MPJPE)     action-wise average: {:.2f} (mm)'.format(np.mean(errors_p1).item()))
         print('Protocol #2 (REL-MPJPE) action-wise average: {:.2f} (mm)'.format(np.mean(errors_p2).item()))
@@ -199,7 +211,7 @@ def main(args):
         print('\nEpoch: %d | LR: %.8f' % (epoch + 1, lr_now))
 
         # Train for one epoch
-        epoch_loss, lr_now, glob_step = train(train_loader, model_pos, criterion, optimizer, device, args.lr, lr_now,
+        epoch_loss, lr_now, glob_step = train(epoch, train_loader, model_pos, criterion, optimizer, device, args.lr, lr_now,
                                               glob_step, args.lr_decay, args.lr_gamma, max_norm=args.max_norm)
 
         # Evaluate
@@ -225,10 +237,10 @@ def main(args):
     return
 
 
-def train(data_loader, model_pos, criterion, optimizer, device, lr_init, lr_now, step, decay, gamma, max_norm=True):
+def train(epoch, data_loader, model_pos, criterion, optimizer, device, lr_init, lr_now, step, decay, gamma, max_norm=True):
     batch_time = AverageMeter()
     data_time = AverageMeter()
-    epoch_loss_score = AverageMeter()
+    epoch_loss = AverageMeter()
 
     # Switch to train mode
     torch.set_grad_enabled(True)
@@ -247,15 +259,25 @@ def train(data_loader, model_pos, criterion, optimizer, device, lr_init, lr_now,
 
         targets_score, inputs_2d = targets_score.to(device), inputs_2d.to(device)
         outputs_score = model_pos(inputs_2d)
-
         optimizer.zero_grad()
-        loss_score = criterion(outputs_score, targets_score)
-        loss_score.backward()
+
+        ### 3d loss
+        if epoch > 200:
+            for key in data_dict.keys():
+                if isinstance(data_dict[key], torch.Tensor):
+                    data_dict[key] = data_dict[key].to(device)
+            output_3d, targets_3d = triangulation_acc(outputs_score, data_dict=data_dict, all_metric=False)
+            loss_ = mpjpe(output_3d['ltr_after'], targets_3d)
+        else:
+            loss_ = criterion(outputs_score, targets_score)
+
+        loss_.backward()
+
         if max_norm:
             nn.utils.clip_grad_norm_(model_pos.parameters(), max_norm=1)
         optimizer.step()
 
-        epoch_loss_score.update(loss_score.item(), num_poses)
+        epoch_loss.update(loss_.item(), num_poses)
 
         # Measure elapsed time
         batch_time.update(time.time() - end)
@@ -264,11 +286,11 @@ def train(data_loader, model_pos, criterion, optimizer, device, lr_init, lr_now,
         bar.suffix = '({batch}/{size}) Data: {data:.6f}s | Batch: {bt:.3f}s | Total: {ttl:} | ETA: {eta:} ' \
                      '| Loss: {loss: .4f}' \
             .format(batch=i + 1, size=len(data_loader), data=data_time.val, bt=batch_time.avg,
-                    ttl=bar.elapsed_td, eta=bar.eta_td, loss=epoch_loss_score.avg)
+                    ttl=bar.elapsed_td, eta=bar.eta_td, loss=epoch_loss.avg)
         bar.next()
 
     bar.finish()
-    return epoch_loss_score.avg, lr_now, step
+    return epoch_loss.avg, lr_now, step
 
 
 def evaluate(data_loader, model_pos, device):
@@ -293,9 +315,9 @@ def evaluate(data_loader, model_pos, device):
         outputs_score = model_pos(inputs_2d).cpu()
         # outputs_3d[:, :, :] -= outputs_3d[:, :1, :]  # Zero-centre the root (hip)
 
-        output_3d, targets_3d = triangulation_acc(outputs_score, data_dict=data_dict)
-        epoch_loss_3d_pos.update(mpjpe(output_3d['ltr_after'], targets_3d).item()*1000.0, num_poses)
-        epoch_loss_3d_pos_relative.update(rel_mpjpe(output_3d['ltr_after'], targets_3d).item()*1000.0, num_poses)
+        output_3d, targets_3d = triangulation_acc(outputs_score, data_dict=data_dict, all_metric=True)
+        epoch_loss_3d_pos.update(mpjpe(output_3d['ltr_before'], targets_3d).item(), num_poses)
+        epoch_loss_3d_pos_relative.update(mpjpe(output_3d['ltr_after'], targets_3d).item(), num_poses)
         # epoch_loss_3d_pos_procrustes.update(p_mpjpe(outputs_3d.numpy(), targets_3d.numpy()).item(), num_poses)
 
         # Measure elapsed time
@@ -303,7 +325,7 @@ def evaluate(data_loader, model_pos, device):
         end = time.time()
 
         bar.suffix = '({batch}/{size}) Data: {data:.6f}s | Batch: {bt:.3f}s | Total: {ttl:} | ETA: {eta:} ' \
-                     '| MPJPE: {e1: .4f} | REL-MPJPE: {e2: .4f}' \
+                     '| MPJPE: {e1: .8f} | REL-MPJPE: {e2: .8f}' \
             .format(batch=i + 1, size=len(data_loader), data=data_time.val, bt=batch_time.avg,
                     ttl=bar.elapsed_td, eta=bar.eta_td, e1=epoch_loss_3d_pos.avg, e2=epoch_loss_3d_pos_relative.avg)
         bar.next()

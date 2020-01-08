@@ -39,7 +39,7 @@ class SemGraphConv(nn.Module):
         adj[self.m] = self.e
         adj = F.softmax(adj, dim=1)
 
-        M = torch.eye(adj.size(0), dtype=torch.float).to(input.device)
+        M = torch.eye(adj.size(0), dtype=torch.float).to(input.device)  # identity
         output = torch.matmul(adj * M, h0) + torch.matmul(adj * (1 - M), h1)
 
         if self.bias is not None:

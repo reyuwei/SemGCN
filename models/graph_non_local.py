@@ -11,7 +11,7 @@ class _NonLocalBlock(nn.Module):
         assert dimension in [1, 2, 3]
 
         self.dimension = dimension
-        self.sub_sample = sub_sample
+        self.sub_sample = sub_sample # node count in each group
 
         self.in_channels = in_channels
         self.inter_channels = inter_channels
@@ -21,6 +21,7 @@ class _NonLocalBlock(nn.Module):
 
         assert self.inter_channels > 0
 
+        # max_pool: pool node group
         if dimension == 3:
             conv_nd = nn.Conv3d
             max_pool = nn.MaxPool3d

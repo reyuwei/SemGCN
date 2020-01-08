@@ -11,23 +11,21 @@ import json_tricks as json
 import xml.etree.cElementTree as ET
 from common.camera import normalize_screen_coordinates_multiview, image_coordinates_multiview
 
-class SynDataset17():
+class SynDataset():
     def __init__(self, root, image_set):
         self.subset = image_set
         self.root = root
-        self.db = []
-        self.image_shape = [1600, 1200]
-        self.view_count = 8
+        self.grouping = []
+        self.image_shape = [0,0]
+        self.view_count = 0
         self.joint_count = 17
-        self.grouping = self._get_db()
-        self.normalize2d()
-        self.group_size = len(self.grouping)
-        self._edge = [(0,1), (1, 2), (2, 6), (3, 6), (3, 4), (5, 4), (6, 7),
-                     (7, 8), (8, 16), (16,9), (8, 12), (8, 13), (12, 11),
-                     (11, 10), (13, 14), (14, 15)]
-        self._nodes_group = [[0,1], [2,3], [4,5], [6,7], [10,11], [14,15], [12,13], [9,16], [8]]
+        self._edge = [(0, 1), (1, 2), (2, 6), (3, 6), (3, 4), (5, 4), (6, 7),
+                      (7, 8), (8, 16), (16, 9), (8, 12), (8, 13), (12, 11),
+                      (11, 10), (13, 14), (14, 15)]
+        self._nodes_group = [[0, 1], [2, 3], [4, 5], [6, 7], [10, 11], [14, 15], [12, 13], [9, 16], [8]]
+
     def __len__(self):
-        return self.group_size
+        return len(self.grouping)
 
     def edge(self):
         return self._edge
@@ -74,13 +72,6 @@ class SynDataset17():
         }
 
         return target_score, input, target_dict
-
-    def abspath2remotepath(self, abspath):
-        search_str = "animation_mit"
-        winpath = PureWindowsPath(abspath[abspath.index(search_str) + len(search_str) + 1:])
-        root_path = Path(self.root)
-        real_path = root_path / winpath
-        return str(real_path)
 
     def parsecalibration(self, calibfolder):
 
@@ -159,6 +150,39 @@ class SynDataset17():
                                                                         self.image_shape[1],
                                                                         self.image_shape[0])
             self.grouping[i]['backbone_joints2d_normalized'] = joints2d
+
+    def project3d(self, K, R, T, joints_3d, rows, cols):
+        joint_count = joints_3d.shape[0]
+
+        RT = np.c_[R, T]
+        joints_3d_hom = np.c_[joints_3d, np.ones(joint_count)]
+
+        joints_3d_w2c = np.matmul(RT, joints_3d_hom.transpose())
+        joint_2d_wh = np.matmul(K, joints_3d_w2c)
+        joint_2d_w = joint_2d_wh / joint_2d_wh[2]
+        joint_2d_w = joint_2d_w[0:2,:].transpose()
+
+        joints_2d_vis_x = np.array(joint_2d_w[:,0] >= 0) & np.array(joint_2d_w[:,0] < cols)
+        joints_2d_vis_y = np.array(joint_2d_w[:,1] >= 0) & np.array(joint_2d_w[:,1] < rows)
+        joints_2d_vis = (joints_2d_vis_x.flatten() & joints_2d_vis_y.flatten()).astype(int).flatten()
+
+        return joint_2d_w, joints_2d_vis
+
+
+class SynDataset17(SynDataset):
+    def __init__(self, root, image_set):
+        super(SynDataset17, self).__init__(root, image_set)
+        self.image_shape = [1600, 1200]
+        self.view_count = 8
+        self.grouping = self._get_db()
+        self.normalize2d()
+
+    def abspath2remotepath(self, abspath):
+        search_str = "animation_mit"
+        winpath = PureWindowsPath(abspath[abspath.index(search_str) + len(search_str) + 1:])
+        root_path = Path(self.root)
+        real_path = root_path / winpath
+        return str(real_path)
 
     def _get_db(self):
         gt_db = []
@@ -286,19 +310,37 @@ class SynDataset17():
         print("Init Dataset Done!!")
         return gt_db
 
-    def project3d(self, K, R, T, joints_3d, rows, cols):
-        joint_count = joints_3d.shape[0]
 
-        RT = np.c_[R, T]
-        joints_3d_hom = np.c_[joints_3d, np.ones(joint_count)]
+class SynDataset17_h36m(SynDataset):
+    def __init__(self, root, image_set):
+        super(SynDataset17_h36m, self).__init__(root, image_set)
+        self.image_shape = [384, 384]
+        self.view_count = 4
+        self.grouping = self._get_db()
+        self.updatetargetscore()
+        self.normalize2d()
 
-        joints_3d_w2c = np.matmul(RT, joints_3d_hom.transpose())
-        joint_2d_wh = np.matmul(K, joints_3d_w2c)
-        joint_2d_w = joint_2d_wh / joint_2d_wh[2]
-        joint_2d_w = joint_2d_w[0:2,:].transpose()
+    def abspath2remotepath(self, abspath):
+        return abspath
 
-        joints_2d_vis_x = np.array(joint_2d_w[:,0] >= 0) & np.array(joint_2d_w[:,0] < cols)
-        joints_2d_vis_y = np.array(joint_2d_w[:,1] >= 0) & np.array(joint_2d_w[:,1] < rows)
-        joints_2d_vis = (joints_2d_vis_x.flatten() & joints_2d_vis_y.flatten()).astype(int).flatten()
+    def updatetargetscore(self):
+        # update target score, the original h36m pkl is gaussian score
+        for i in range(len(self.grouping)):
+            joints_2ds = self.grouping[i]['joints_2d']
+            joints_2ds_backbone = self.grouping[i]['backbone_joints2d']
+            target_score = np.linalg.norm(joints_2ds - joints_2ds_backbone[:, :, 0:2], axis=2)
+            target_score = 1 / target_score
+            target_score = target_score.transpose((1, 0))  # J,V
+            self.grouping[i]['target_score'] = target_score
 
-        return joint_2d_w, joints_2d_vis
+    def _get_db(self):
+        gt_db = []
+        pkl_name = os.path.join(self.root, 'list', 'pkl', self.subset + '.pkl')
+        ########################### load from pkl
+        if os.path.exists(pkl_name):
+            print("Loading dataset from: " + pkl_name)
+            with open(pkl_name,'rb') as f:
+                gt_db = pickle.load(f)
+            return gt_db
+        else:
+            assert("no pkl existed!!!")
