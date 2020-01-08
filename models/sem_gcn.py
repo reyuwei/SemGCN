@@ -56,6 +56,26 @@ class _GraphNonLocal(nn.Module):
         out = out[:, self.restored_order, :]
         return out
 
+class _ViewGraphNonLocal(nn.Module):
+    def __init__(self, hid_dim, view_count):
+        super(_ViewGraphNonLocal, self).__init__()
+        self.nonlocal_layer = GraphNonLocal(hid_dim, sub_sample=1)  # sub_sample = 1 means no pooling
+        self.view_count = view_count
+
+    def forward(self, x):
+        NV, J, C = x.shape
+        N = NV // self.view_count
+        out = x.view(N, self.view_count, J, C)
+        out = out.permute(0, 2, 1, 3).contiguous() # n j v c
+        out = out.view(N*J, self.view_count, C)
+
+        out = self.nonlocal_layer(out.transpose(1, 2)).transpose(1, 2)
+
+        out = out.view(N, J, self.view_count, C)
+        out = out.permute(0, 2, 1, 3).contiguous()
+        out = out.view(NV, J, C)
+        return out
+
 
 class SemGCN(nn.Module):
     def __init__(self, adj, hid_dim, coords_dim=(2, 3), num_layers=4, nodes_group=None, p_dropout=None):
@@ -96,7 +116,7 @@ class SemGCN(nn.Module):
 
 
 class MultiviewSemGCN(nn.Module):
-    def __init__(self, adj, hid_dim, coords_dim=(3,1), num_layers=4, nodes_group=None, p_dropout=None):
+    def __init__(self, adj, hid_dim, coords_dim=(3,1), num_layers=4, nodes_group=None, p_dropout=None, view_count=None):
         super(MultiviewSemGCN, self).__init__()
 
         _gconv_input = [_GraphConv(adj, coords_dim[0], hid_dim, p_dropout=p_dropout)]
@@ -121,6 +141,9 @@ class MultiviewSemGCN(nn.Module):
             for i in range(num_layers):
                 _gconv_layers.append(_ResGraphConv(adj, hid_dim, hid_dim, hid_dim, p_dropout=p_dropout))
                 _gconv_layers.append(_GraphNonLocal(hid_dim, grouped_order, restored_order, group_size))
+                if view_count is not None:  # add view graph convolution
+                    _gconv_layers.append(_ViewGraphNonLocal(hid_dim, view_count=view_count))
+
 
         self.gconv_input = nn.Sequential(*_gconv_input)
         self.gconv_layers = nn.Sequential(*_gconv_layers)

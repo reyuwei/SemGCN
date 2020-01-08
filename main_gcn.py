@@ -129,7 +129,7 @@ def main(args):
     print("==> Creating model...")
     p_dropout = (None if args.dropout == 0.0 else args.dropout)
     model_pos = MultiviewSemGCN(adj, args.hid_dim, coords_dim=(3, 1), num_layers=args.num_layers, p_dropout=p_dropout,
-                       nodes_group=nodes_group).to(device)
+                                view_count=dataset.view_count, nodes_group=nodes_group).to(device)
     print("==> Total parameters: {:.2f}M".format(sum(p.numel() for p in model_pos.parameters()) / 1000000.0))
 
     criterion = nn.MSELoss(reduction='mean').to(device)
@@ -207,11 +207,12 @@ def main(args):
         print('Protocol #2 (REL-MPJPE) action-wise average: {:.2f} (mm)'.format(np.mean(errors_p2).item()))
         exit(0)
 
+    epoch_loss = 1e5
     for epoch in range(start_epoch, args.epochs):
         print('\nEpoch: %d | LR: %.8f' % (epoch + 1, lr_now))
 
         # Train for one epoch
-        epoch_loss, lr_now, glob_step = train(epoch, train_loader, model_pos, criterion, optimizer, device, args.lr, lr_now,
+        epoch_loss, lr_now, glob_step = train(epoch_loss, train_loader, model_pos, criterion, optimizer, device, args.lr, lr_now,
                                               glob_step, args.lr_decay, args.lr_gamma, max_norm=args.max_norm)
 
         # Evaluate
@@ -237,7 +238,7 @@ def main(args):
     return
 
 
-def train(epoch, data_loader, model_pos, criterion, optimizer, device, lr_init, lr_now, step, decay, gamma, max_norm=True):
+def train(loss_last, data_loader, model_pos, criterion, optimizer, device, lr_init, lr_now, step, decay, gamma, max_norm=True):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     epoch_loss = AverageMeter()
@@ -246,7 +247,6 @@ def train(epoch, data_loader, model_pos, criterion, optimizer, device, lr_init, 
     torch.set_grad_enabled(True)
     model_pos.train()
     end = time.time()
-    loss_value = 1e5
 
     bar = Bar('Train', max=len(data_loader))
     for i, (targets_score, inputs_2d, data_dict) in enumerate(data_loader):
@@ -263,7 +263,7 @@ def train(epoch, data_loader, model_pos, criterion, optimizer, device, lr_init, 
         optimizer.zero_grad()
 
         ### 3d loss
-        if loss_value < 0.3:
+        if loss_last < 0.3:
             for key in data_dict.keys():
                 if isinstance(data_dict[key], torch.Tensor):
                     data_dict[key] = data_dict[key].to(device)
@@ -271,7 +271,7 @@ def train(epoch, data_loader, model_pos, criterion, optimizer, device, lr_init, 
             loss_ = mpjpe(output_3d['ltr_after'], targets_3d)
         else:
             loss_ = criterion(outputs_score, targets_score)
-        loss_value = loss_.item()
+
         loss_.backward()
 
         if max_norm:
