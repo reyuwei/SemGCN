@@ -196,7 +196,7 @@ def main(args):
                 errors_p1[i], errors_p2[i] = evaluate(valid_loader, model_pos, device)
         elif "synmit" in args.dataset:
             if "h36m" in args.dataset:
-                test_dataset = SynDataset17_h36m(dataset_path, image_set="train")
+                test_dataset = SynDataset17_h36m(dataset_path, image_set="test")
             else:
                 test_dataset = SynDataset17(dataset_path, image_set="test")
             test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
@@ -246,6 +246,7 @@ def train(epoch, data_loader, model_pos, criterion, optimizer, device, lr_init, 
     torch.set_grad_enabled(True)
     model_pos.train()
     end = time.time()
+    loss_value = 1e5
 
     bar = Bar('Train', max=len(data_loader))
     for i, (targets_score, inputs_2d, data_dict) in enumerate(data_loader):
@@ -262,7 +263,7 @@ def train(epoch, data_loader, model_pos, criterion, optimizer, device, lr_init, 
         optimizer.zero_grad()
 
         ### 3d loss
-        if epoch > 200:
+        if loss_value < 0.3:
             for key in data_dict.keys():
                 if isinstance(data_dict[key], torch.Tensor):
                     data_dict[key] = data_dict[key].to(device)
@@ -270,7 +271,7 @@ def train(epoch, data_loader, model_pos, criterion, optimizer, device, lr_init, 
             loss_ = mpjpe(output_3d['ltr_after'], targets_3d)
         else:
             loss_ = criterion(outputs_score, targets_score)
-
+        loss_value = loss_.item()
         loss_.backward()
 
         if max_norm:
@@ -315,9 +316,9 @@ def evaluate(data_loader, model_pos, device):
         outputs_score = model_pos(inputs_2d).cpu()
         # outputs_3d[:, :, :] -= outputs_3d[:, :1, :]  # Zero-centre the root (hip)
 
-        output_3d, targets_3d = triangulation_acc(outputs_score, data_dict=data_dict, all_metric=True)
-        epoch_loss_3d_pos.update(mpjpe(output_3d['ltr_before'], targets_3d).item(), num_poses)
-        epoch_loss_3d_pos_relative.update(mpjpe(output_3d['ltr_after'], targets_3d).item(), num_poses)
+        output_3d, targets_3d = triangulation_acc(outputs_score, data_dict=data_dict, all_metric=False)
+        epoch_loss_3d_pos.update(mpjpe(output_3d['ltr_after'], targets_3d).item(), num_poses)
+        epoch_loss_3d_pos_relative.update(rel_mpjpe(output_3d['ltr_after'], targets_3d).item(), num_poses)
         # epoch_loss_3d_pos_procrustes.update(p_mpjpe(outputs_3d.numpy(), targets_3d.numpy()).item(), num_poses)
 
         # Measure elapsed time
