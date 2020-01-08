@@ -53,7 +53,9 @@ def parse_args():
     parser.add_argument('--no_max', dest='max_norm', action='store_false', help='if use max_norm clip on grad')
     parser.set_defaults(max_norm=True)
     parser.add_argument('--non_local', dest='non_local', action='store_true', help='if use non-local layers')
+    parser.add_argument('--multiview', dest='multiview', action='store_true', help='if use view non-local layers')
     parser.set_defaults(non_local=False)
+    parser.set_defaults(multiview=False)
     parser.add_argument('--dropout', default=0.0, type=float, help='dropout rate')
 
     # Experimental
@@ -128,8 +130,9 @@ def main(args):
     # Create model
     print("==> Creating model...")
     p_dropout = (None if args.dropout == 0.0 else args.dropout)
+    view_count = dataset.view_count if args.multiview else None
     model_pos = MultiviewSemGCN(adj, args.hid_dim, coords_dim=(3, 1), num_layers=args.num_layers, p_dropout=p_dropout,
-                                view_count=dataset.view_count, nodes_group=nodes_group).to(device)
+                                view_count=view_count, nodes_group=nodes_group).to(device)
     print("==> Total parameters: {:.2f}M".format(sum(p.numel() for p in model_pos.parameters()) / 1000000.0))
 
     criterion = nn.MSELoss(reduction='mean').to(device)
@@ -169,7 +172,8 @@ def main(args):
         error_best = None
         glob_step = 0
         lr_now = args.lr
-        ckpt_dir_path = path.join(args.checkpoint, args.dataset + "_" + datetime.datetime.now().isoformat(timespec="seconds"))
+        mv_str = "mv_" if args.multiview else ""
+        ckpt_dir_path = path.join(args.checkpoint, args.dataset + "_" + mv_str + datetime.datetime.now().isoformat(timespec="seconds"))
         ckpt_dir_path = ckpt_dir_path.replace(":","-")
 
         if not path.exists(ckpt_dir_path):
