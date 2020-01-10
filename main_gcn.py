@@ -54,8 +54,12 @@ def parse_args():
     parser.set_defaults(max_norm=True)
     parser.add_argument('--non_local', dest='non_local', action='store_true', help='if use non-local layers')
     parser.add_argument('--multiview', dest='multiview', action='store_true', help='if use view non-local layers')
+    parser.add_argument('--loss3d', dest='loss3d', action='store_true', help='if use 3d loss (slower)')
+    parser.add_argument('--earlyend', dest='earlyend', action='store_true', help='if end early during each epoch')
     parser.set_defaults(non_local=False)
     parser.set_defaults(multiview=False)
+    parser.set_defaults(loss3d=False)
+    parser.set_defaults(earlyend=False)
     parser.add_argument('--dropout', default=0.0, type=float, help='dropout rate')
 
     # Experimental
@@ -148,8 +152,8 @@ def main(args):
             start_epoch = ckpt['epoch']
             error_best = ckpt['error']
             glob_step = ckpt['step']
-            # lr_now = ckpt['lr']
-            lr_now = args.lr
+            lr_now = ckpt['lr']
+            # lr_now = args.lr
             ####
             if args.dataset == "h36m":
                 for k in list(ckpt['state_dict'].keys()):
@@ -217,7 +221,8 @@ def main(args):
 
         # Train for one epoch
         epoch_loss, lr_now, glob_step = train(epoch_loss, train_loader, model_pos, criterion, optimizer, device, args.lr, lr_now,
-                                              glob_step, args.lr_decay, args.lr_gamma, max_norm=args.max_norm)
+                                              glob_step, args.lr_decay, args.lr_gamma, max_norm=args.max_norm, loss_3d=args.loss3d,
+                                              earlyend=args.earlyend)
 
         # Evaluate
         error_eval_p1, error_eval_p2 = evaluate(valid_loader, model_pos, device)
@@ -242,7 +247,8 @@ def main(args):
     return
 
 
-def train(loss_last, data_loader, model_pos, criterion, optimizer, device, lr_init, lr_now, step, decay, gamma, max_norm=True):
+def train(loss_last, data_loader, model_pos, criterion, optimizer, device, lr_init, lr_now, step, decay, gamma,
+          max_norm=True, loss_3d=False, earlyend=True):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     epoch_loss = AverageMeter()
@@ -251,13 +257,19 @@ def train(loss_last, data_loader, model_pos, criterion, optimizer, device, lr_in
     torch.set_grad_enabled(True)
     model_pos.train()
     end = time.time()
+    dataperepoch_limit = 1e10
+    dataperepoch_count = 0
+    if earlyend:
+        dataperepoch_limit = 1
 
     bar = Bar('Train', max=len(data_loader))
     for i, (targets_score, inputs_2d, data_dict) in enumerate(data_loader):
         # Measure data loading time
         data_time.update(time.time() - end)
         num_poses = targets_score.size(0)
-
+        dataperepoch_count += num_poses
+        if dataperepoch_count >= dataperepoch_limit:
+            break
         step += 1
         if step % decay == 0 or step == 1:
             lr_now = lr_decay(optimizer, step, lr_init, decay, gamma)
@@ -267,7 +279,8 @@ def train(loss_last, data_loader, model_pos, criterion, optimizer, device, lr_in
         optimizer.zero_grad()
 
         ### 3d loss
-        if loss_last < 0.3:
+        if loss_last < 0.3 or loss_3d:
+            loss_3d = True
             for key in data_dict.keys():
                 if isinstance(data_dict[key], torch.Tensor):
                     data_dict[key] = data_dict[key].to(device)

@@ -10,6 +10,8 @@ from pathlib import *
 import json_tricks as json
 import xml.etree.cElementTree as ET
 from common.camera import normalize_screen_coordinates_multiview, image_coordinates_multiview
+import cv2
+import matplotlib.pyplot as plt
 
 class SynDataset():
     def __init__(self, root, image_set):
@@ -42,6 +44,29 @@ class SynDataset():
         T = camera['T']
         RT = np.hstack([R,T])
         return np.matmul(K,RT)
+
+    def prevalid(self):
+        from common.triangulation import triangulation_acc
+        from common.utils import AverageMeter
+        from common.loss import mpjpe
+        acc_pre = AverageMeter()
+        acc_best = AverageMeter()
+        acc_svd = AverageMeter()
+        for i in range(len(self)):
+            target_score, input, data_dict = self.__getitem__(i)
+            target_score = target_score.unsqueeze(0)
+            for item in data_dict.keys():
+                data_dict[item] = data_dict[item].unsqueeze(0)
+            output_3d_dict, targets_3d = triangulation_acc(target_score, data_dict, all_metric=True)
+            acc_pre.update(mpjpe(output_3d_dict['ltr_before'], targets_3d))
+            acc_best.update(mpjpe(output_3d_dict['ltr_best'], targets_3d))
+            acc_svd.update(mpjpe(output_3d_dict['ltr_svd'], targets_3d))
+
+        acc_str = "before: {:.5f}, best: {:.5f}, " \
+                  "svd: {:.5f}".format(acc_pre.avg, acc_best.avg, acc_svd.avg)
+        print("Pre validation: ")
+        print(acc_str)
+
 
     def __getitem__(self, idx):
         frame = copy.deepcopy(self.grouping[idx])
@@ -143,12 +168,13 @@ class SynDataset():
         return joints_3d_17
 
     def normalize2d(self):
-        #normalize input
+        # normalize input
         for i in range(len(self.grouping)):
             joints2d = copy.deepcopy(self.grouping[i]['backbone_joints2d'])
             joints2d[:, :, 0:2] = normalize_screen_coordinates_multiview(joints2d[:, :, 0:2],
                                                                         self.image_shape[1],
                                                                         self.image_shape[0])
+            joints2d[:, :, 2] -= 0.5
             self.grouping[i]['backbone_joints2d_normalized'] = joints2d
 
     def project3d(self, K, R, T, joints_3d, rows, cols):
@@ -167,6 +193,43 @@ class SynDataset():
         joints_2d_vis = (joints_2d_vis_x.flatten() & joints_2d_vis_y.flatten()).astype(int).flatten()
 
         return joint_2d_w, joints_2d_vis
+
+    def project3d(self, camp, joints_3d):
+        joint_count = joints_3d.shape[0]
+        joints_3d_hom = np.c_[joints_3d, np.ones(joint_count)]
+        joint_2d_wh = np.matmul(camp, joints_3d_hom.transpose())
+        joint_2d_w = joint_2d_wh / joint_2d_wh[2]
+        joint_2d_w = joint_2d_w[0:2, :].transpose()
+        return joint_2d_w
+
+
+    def visualize(self, id):
+        imgnames = self.grouping[id]['image']
+        joints_2ds_backbone = self.grouping[id]['backbone_joints2d']
+        joints_2ds = self.grouping[id]['joints_2d']
+        joints_3d = self.grouping[id]['joints_3d']
+        cams = self.grouping[id]['camera_proj_mat']
+        for v in range(self.view_count):
+            # image = cv2.imread(imgnames[v])
+            joints_2d = joints_2ds[v]
+            joints_2d_backbone_wscore = joints_2ds_backbone[v]
+            joint2d_proj = self.project3d(cams[v], joints_3d)
+
+            assert(np.sum(joint2d_proj - joints_2d) < 0.0001)
+
+            # for j in joint2d_proj: # gt projection
+            #     cv2.circle(image, (int(j[0]), int(j[1])), 5, (0,0,255), thickness=-1)
+            # for j in joints_2d: # gt projection
+            #     cv2.circle(image, (int(j[0]), int(j[1])), 5, (0,255,0), thickness=-1)
+            # for j in joints_2d_backbone_wscore: # prediction
+            #     cv2.circle(image, (int(j[0]), int(j[1])), 5, (255, 0, 0), thickness=-1)
+            # ## project
+
+            # plt.figure()
+            # plt.title(imgnames[v])
+            # plt.imshow(image)
+            # plt.draw()
+            # cv2.imwrite("tmp.png", image)
 
 
 class SynDataset17(SynDataset):
@@ -314,11 +377,15 @@ class SynDataset17(SynDataset):
 class SynDataset17_h36m(SynDataset):
     def __init__(self, root, image_set):
         super(SynDataset17_h36m, self).__init__(root, image_set)
-        self.image_shape = [384, 384]
+        self.image_shape = [1000, 1000]
         self.view_count = 4
         self.grouping = self._get_db()
         self.updatetargetscore()
         self.normalize2d()
+        # for i in range(len(self.grouping)):
+        #     self.visualize(i)
+        print("Data length: " + str(len(self.grouping)))
+        # self.prevalid()
 
     def abspath2remotepath(self, abspath):
         return abspath
@@ -333,14 +400,15 @@ class SynDataset17_h36m(SynDataset):
             target_score = target_score.transpose((1, 0))  # J,V
             self.grouping[i]['target_score'] = target_score
 
+
     def _get_db(self):
-        gt_db = []
         pkl_name = os.path.join(self.root, 'list', 'pkl', self.subset + '.pkl')
         ########################### load from pkl
         if os.path.exists(pkl_name):
             print("Loading dataset from: " + pkl_name)
             with open(pkl_name,'rb') as f:
                 gt_db = pickle.load(f)
+            # gt_db = gt_db[0:10]
             return gt_db
         else:
             assert("no pkl existed!!!")
